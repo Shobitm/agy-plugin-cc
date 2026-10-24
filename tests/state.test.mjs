@@ -57,10 +57,10 @@ test("concurrent updates from several processes do not lose fields", async () =>
           ["--input-type=module", "-e", `const s = await import(${JSON.stringify(stateUrl)}); for (let j = 0; j < 20; j++) s.updateJob(${JSON.stringify(sb.repo)}, "task-c-0001", { ["f${i}_" + j]: j });`],
           { env: { ...process.env, AGY_COMPANION_STATE_DIR: sb.env.AGY_COMPANION_STATE_DIR }, stdio: "inherit" }
         );
-        child.on("exit", resolve);
+        child.on("exit", (code) => resolve(code));
       })
     );
-    await Promise.all(writers);
+    assert.deepEqual(await Promise.all(writers), Array(8).fill(0), "a writer process crashed");
     const job = loadJob(sb.repo, "task-c-0001");
     assert.equal(Object.keys(job).filter((k) => /^f\d_\d+$/.test(k)).length, 160);
   });

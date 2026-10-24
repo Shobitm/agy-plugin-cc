@@ -52,16 +52,38 @@ function jobsDir(cwd) {
   return path.join(resolveStateDir(cwd), "jobs");
 }
 
+// On Windows, antivirus/indexers briefly hold freshly written files open and
+// rename/unlink fail with EPERM/EBUSY/EACCES. Retry those with backoff.
+const TRANSIENT_FS_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+
+function retryFs(fn) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return fn();
+    } catch (err) {
+      if (!TRANSIENT_FS_CODES.has(err.code) || attempt >= 40) {
+        throw err;
+      }
+      sleepSync(Math.min(10 * (attempt + 1), 100));
+    }
+  }
+}
+
 function writeJsonAtomic(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${randomBytes(3).toString("hex")}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
-  fs.renameSync(tmp, file);
+  try {
+    retryFs(() => fs.renameSync(tmp, file));
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 function readJson(file, fallback) {
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
+    return JSON.parse(retryFs(() => fs.readFileSync(file, "utf8")));
   } catch {
     return fallback;
   }
@@ -82,12 +104,12 @@ function withLock(file, fn) {
       fs.closeSync(fs.openSync(lock, "wx"));
       break;
     } catch (err) {
-      if (err.code !== "EEXIST") {
+      if (err.code !== "EEXIST" && !TRANSIENT_FS_CODES.has(err.code)) {
         throw err;
       }
       try {
         if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) {
-          fs.rmSync(lock, { force: true });
+          retryFs(() => fs.rmSync(lock, { force: true }));
           continue;
         }
       } catch {
@@ -102,7 +124,7 @@ function withLock(file, fn) {
   try {
     return fn();
   } finally {
-    fs.rmSync(lock, { force: true });
+    retryFs(() => fs.rmSync(lock, { force: true }));
   }
 }
 
