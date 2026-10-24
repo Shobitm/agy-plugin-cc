@@ -155,7 +155,18 @@ function launchWorker(workspace, job) {
   updateJob(workspace, job.id, { pid: child.pid, logFile });
 }
 
-async function submitJob({ kind, title, write, runCwd, agyArgs, targetLabel, background, json }) {
+const DEFAULT_FOREGROUND_WAIT_SECONDS = 540;
+
+function resolveWaitSeconds(options) {
+  const raw = options.waitTimeout ?? process.env.AGY_FOREGROUND_WAIT_SECS ?? DEFAULT_FOREGROUND_WAIT_SECONDS;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error(`Invalid --wait-timeout "${raw}". Expected a positive number of seconds.`);
+  }
+  return seconds;
+}
+
+async function submitJob({ kind, title, write, runCwd, agyArgs, targetLabel, background, json, waitSeconds }) {
   const workspace = resolveWorkspaceRoot(runCwd);
   const job = {
     id: newJobId(kind),
@@ -184,7 +195,32 @@ async function submitJob({ kind, title, write, runCwd, agyArgs, targetLabel, bac
     return;
   }
 
-  const finished = await executeJob(workspace, job);
+  // Foreground runs still execute in a detached worker. Claude Code's Bash tool
+  // kills commands after its timeout (2 min by default, 10 max), and agy runs
+  // often take longer; waiting with a deadline lets us hand back a job id
+  // instead of dying silently and losing the run.
+  launchWorker(workspace, job);
+  const deadline = Date.now() + waitSeconds * 1000;
+  let finished = getJob(workspace, job.id);
+  while ((finished.status === "queued" || finished.status === "running") && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    finished = getJob(workspace, job.id);
+  }
+
+  if (finished.status === "queued" || finished.status === "running") {
+    if (json) {
+      out(JSON.stringify({ jobId: finished.id, status: finished.status, conversationId: null, rawOutput: null, error: null }, null, 2));
+    } else {
+      out(
+        [
+          `Antigravity ${kind} ${finished.id} is still running after ${waitSeconds}s; it continues in the background.`,
+          `Check progress with /agy:status ${finished.id}; fetch output with /agy:result ${finished.id}.`,
+        ].join("\n")
+      );
+    }
+    return;
+  }
+
   if (json) {
     out(
       JSON.stringify(
@@ -299,7 +335,7 @@ function resolveContinuation(workspace, options) {
 
 async function handleTask(rawArgs) {
   const { options, positionals } = parseCommandInput(rawArgs, {
-    valueFlags: ["model", "effort", "cwd", "promptFile", "conversation", "timeout"],
+    valueFlags: ["model", "effort", "cwd", "promptFile", "conversation", "timeout", "waitTimeout"],
     booleanFlags: ["write", "readOnly", "resume", "resumeLast", "fresh", "json", "background", "wait"],
     aliases: { "--read-only": "readOnly", "--resume-last": "resumeLast", "--prompt-file": "promptFile" },
   });
@@ -337,12 +373,13 @@ async function handleTask(rawArgs) {
     agyArgs,
     background: Boolean(options.background),
     json: Boolean(options.json),
+    waitSeconds: options.background ? 0 : resolveWaitSeconds(options),
   });
 }
 
 async function handleReview(kind, rawArgs) {
   const { options, positionals } = parseCommandInput(rawArgs, {
-    valueFlags: ["base", "scope", "model", "effort", "cwd", "promptFile", "timeout"],
+    valueFlags: ["base", "scope", "model", "effort", "cwd", "promptFile", "timeout", "waitTimeout"],
     booleanFlags: ["json", "background", "wait"],
     aliases: { "--prompt-file": "promptFile" },
   });
@@ -389,6 +426,7 @@ async function handleReview(kind, rawArgs) {
     targetLabel: context.label,
     background: Boolean(options.background),
     json: Boolean(options.json),
+    waitSeconds: options.background ? 0 : resolveWaitSeconds(options),
   });
 }
 
@@ -534,7 +572,7 @@ function printHelp() {
       "",
       "Subcommands:",
       "  setup [--json] [--enable-review-gate|--disable-review-gate]",
-      "  task [--write|--read-only] [--resume|--fresh] [--conversation <id>] [--model <m>] [--effort <low|medium|high|xhigh|max>] [--timeout <dur>] [--background] [--prompt-file <path>] [--json] [prompt]",
+      "  task [--write|--read-only] [--resume|--fresh] [--conversation <id>] [--model <m>] [--effort <low|medium|high|xhigh|max>] [--timeout <dur>] [--background] [--wait-timeout <secs>] [--prompt-file <path>] [--json] [prompt]",
       "  review [--base <ref>] [--scope auto|working-tree|branch|decision] [--background] [--json] [focus]",
       "  adversarial-review [--base <ref>] [--scope auto|working-tree|branch|decision] [--prompt-file <path>] [--background] [--json] [focus or decision brief]",
       "  status [job-id] [--wait] [--timeout-ms <ms>] [--all] [--json]",

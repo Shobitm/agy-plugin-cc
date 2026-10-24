@@ -232,3 +232,18 @@ test("stop hook does not re-enter while stop_hook_active", () => {
   assert.equal(res.stdout, "");
   assert.equal(agyCalls(sb).length, 0);
 });
+
+test("foreground run past --wait-timeout hands back the job and keeps running", async () => {
+  const sb = makeSandbox();
+  const res = companion(sb, ["task", "--wait-timeout", "1", "slow one"], { FAKE_AGY_SLEEP_MS: "2500", FAKE_AGY_RESPONSE: "late answer" });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /still running after 1s/);
+  const jobId = res.stdout.match(/(task-[a-z0-9]+-[a-f0-9]+)/)[1];
+  assert.ok(await waitFor(() => JSON.parse(companion(sb, ["status", jobId, "--json"]).stdout).status === "completed"));
+  assert.match(companion(sb, ["result", jobId]).stdout, /late answer/);
+});
+
+test("invalid --wait-timeout is rejected", () => {
+  const sb = makeSandbox();
+  assert.match(companion(sb, ["task", "--wait-timeout", "soon", "x"]).stderr, /Invalid --wait-timeout/);
+});

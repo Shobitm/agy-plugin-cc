@@ -41,9 +41,9 @@ From GitHub:
 From a release tarball (offline / air-gapped):
 
 ```bash
-tar -xzf agy-plugin-cc-0.1.0.tar.gz -C ~/plugins
+tar -xzf agy-plugin-cc-0.1.1.tar.gz -C ~/plugins
 # in Claude Code:
-/plugin marketplace add ~/plugins/agy-plugin-cc-0.1.0
+/plugin marketplace add ~/plugins/agy-plugin-cc-0.1.1
 /plugin install agy@agy-plugin-cc
 /reload-plugins
 /agy:setup

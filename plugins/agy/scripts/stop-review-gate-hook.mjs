@@ -52,7 +52,7 @@ export function parseGateAnswer(rawOutput) {
 function runGate(cwd, input) {
   const result = spawnSync(
     process.execPath,
-    [path.join(SCRIPT_DIR, "agy-companion.mjs"), "task", "--read-only", "--json", "--cwd", cwd, buildPrompt(input)],
+    [path.join(SCRIPT_DIR, "agy-companion.mjs"), "task", "--read-only", "--json", "--wait-timeout", "840", "--cwd", cwd, buildPrompt(input)],
     { cwd, encoding: "utf8", timeout: STOP_REVIEW_TIMEOUT_MS }
   );
   if (result.error?.code === "ETIMEDOUT") {

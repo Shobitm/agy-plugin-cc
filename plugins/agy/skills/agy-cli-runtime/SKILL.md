@@ -18,6 +18,7 @@ What the helper does:
 - `--read-only` (default without `--write`) → `agy --mode plan` (no edits).
 - Records every run as a job (`/agy:status`, `/agy:result`, `/agy:cancel`) and remembers the Antigravity conversation ID for `--resume-last`.
 - `--background` detaches the run and returns a job ID immediately.
+- Foreground runs wait up to 540s (`--wait-timeout <secs>`), then return a "still running" message with the job ID while the run continues in the background.
 
 Flags:
 - `--write` | `--read-only`
@@ -26,7 +27,7 @@ Flags:
 - `--background`, `--json`, `--cwd <dir>`
 
 Execution rules:
-- Exactly one `task` invocation per rescue handoff. The subagent is a forwarder, not an orchestrator.
+- Exactly one `task` invocation per rescue handoff, with the Bash tool `timeout` set to `600000`. The subagent is a forwarder, not an orchestrator.
 - Prefer the helper over calling `agy` directly or any other Bash activity.
 - Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel` from `agy:agy-rescue`.
 - Leave `--model` and `--effort` unset unless the user explicitly asked.

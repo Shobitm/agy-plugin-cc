@@ -36,6 +36,7 @@ Foreground flow:
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" adversarial-review --wait $ARGUMENTS
 ```
+- Run it with the Bash tool `timeout` set to `600000` (agy runs exceed the 2-minute default). If the output says the job is still running, return it as-is.
 - Return stdout verbatim. Do not paraphrase, summarize, or add commentary. Do not fix anything it reports.
 
 Background flow:
