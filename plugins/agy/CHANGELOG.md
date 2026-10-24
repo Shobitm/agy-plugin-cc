@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+- Windows: the read-only integrity check now resolves paths natively (short names such as `RUNNER~1`) when excluding the plugin's own state directory.
+
 ## 0.2.1
 
 - Fix: `/agy:rescue` never reported Antigravity's answer back. The subagent detached the job with `--background`, finished in seconds holding only a job ID, and nothing announced completion. The subagent now always stays attached: it runs `task` in the foreground and, if the output starts with `STILL_RUNNING <job-id>`, keeps calling the new `result <job-id> --wait` until the answer exists. `/agy:rescue --background` backgrounds the subagent itself on the Claude side, so you are notified with the real result.
