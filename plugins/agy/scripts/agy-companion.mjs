@@ -13,21 +13,25 @@ import {
   getAgyAvailability,
   resolveAgyBinary,
   runAgy,
+  runAgySync,
   validateEffort,
 } from "./lib/agy.mjs";
-import { buildReviewCollectionGuidance, buildReviewInputSection, collectReviewContext } from "./lib/git.mjs";
 import {
-  extractJsonObject,
-  isReviewPayload,
-  renderJobDetail,
-  renderJobsTable,
-  renderRawReview,
-  renderReviewMarkdown,
-} from "./lib/render.mjs";
+  buildReviewCollectionGuidance,
+  buildReviewInputSection,
+  collectReviewContext,
+  diffFingerprints,
+  newBoundary,
+  wrapUntrusted,
+  workspaceFingerprint,
+} from "./lib/git.mjs";
+import { killTree, processStartTime } from "./lib/proc.mjs";
+import { extractReviewPayload, renderJobDetail, renderJobsTable, renderRawReview, renderReviewMarkdown } from "./lib/render.mjs";
 import {
+  ACTIVE_STATUSES,
   getConfig,
   getJob,
-  isProcessAlive,
+  jobLogFile,
   latestJob,
   listJobs,
   newJobId,
@@ -40,11 +44,13 @@ import {
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const PLUGIN_ROOT = path.resolve(path.dirname(SCRIPT_PATH), "..");
+const DEFAULT_FOREGROUND_WAIT_SECONDS = 540;
 
 const READ_ONLY_SUFFIX = [
   "",
   "<execution_constraints>",
-  "This is a read-only Antigravity run. Do not modify files, run mutating commands, or create commits.",
+  "This is a read-only Antigravity run. Do not modify, create, or delete files, run mutating commands, or create commits.",
+  "The workspace is fingerprinted before and after this run; any change fails the run.",
   "Do not write an implementation-plan artifact and do not ask for approval: answer directly in your final response.",
   "Do not invoke the agy CLI or any agy-rescue / agy-review skill; you are already the delegated agent.",
   "</execution_constraints>",
@@ -87,76 +93,6 @@ function readPromptFile(workingDir, promptFile) {
   return fs.readFileSync(path.resolve(workingDir, promptFile), "utf8").trim();
 }
 
-// ---------------------------------------------------------------------------
-// Job execution (shared by foreground runs and detached workers)
-// ---------------------------------------------------------------------------
-
-function renderJobOutput(job, result) {
-  if (job.kind === "task") {
-    return result.response || "(Antigravity returned an empty response.)";
-  }
-  const title = REVIEW_TITLES[job.kind];
-  const payload = extractJsonObject(result.response);
-  return isReviewPayload(payload)
-    ? renderReviewMarkdown(title, job.request.targetLabel, payload)
-    : renderRawReview(title, job.request.targetLabel, result.response);
-}
-
-function summarize(job, result) {
-  if (job.kind !== "task") {
-    const payload = extractJsonObject(result.response);
-    if (isReviewPayload(payload)) {
-      return `${payload.verdict}: ${payload.findings.length} finding(s)`;
-    }
-  }
-  return String(result.response ?? "").split(/\r?\n/).find((line) => line.trim()) ?? "";
-}
-
-async function executeJob(workspace, job) {
-  updateJob(workspace, job.id, { status: "running", startedAt: nowIso(), pid: process.pid });
-  try {
-    const result = await runAgy(job.request.runCwd, job.request.agyArgs, {
-      onSpawn: (child) => updateJob(workspace, job.id, { agyPid: child.pid }),
-    });
-    const output = renderJobOutput(job, result);
-    const current = getJob(workspace, job.id);
-    if (current?.status === "cancelled") {
-      return current;
-    }
-    return updateJob(workspace, job.id, {
-      status: "completed",
-      finishedAt: nowIso(),
-      conversationId: result.conversationId,
-      usage: result.usage,
-      rawOutput: result.response,
-      output,
-      summary: summarize(job, result),
-    });
-  } catch (error) {
-    const current = getJob(workspace, job.id);
-    if (current?.status === "cancelled") {
-      return current;
-    }
-    return updateJob(workspace, job.id, { status: "failed", finishedAt: nowIso(), error: error.message });
-  }
-}
-
-function launchWorker(workspace, job) {
-  const logFile = path.join(resolveStateDir(workspace), "jobs", `${job.id}.log`);
-  const logFd = fs.openSync(logFile, "a");
-  const child = spawn(process.execPath, [SCRIPT_PATH, "_worker", job.id, "--cwd", workspace], {
-    cwd: workspace,
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-    env: process.env,
-  });
-  child.unref();
-  fs.closeSync(logFd);
-  updateJob(workspace, job.id, { pid: child.pid, logFile });
-}
-
-const DEFAULT_FOREGROUND_WAIT_SECONDS = 540;
-
 function resolveWaitSeconds(options) {
   const raw = options.waitTimeout ?? process.env.AGY_FOREGROUND_WAIT_SECS ?? DEFAULT_FOREGROUND_WAIT_SECONDS;
   const seconds = Number(raw);
@@ -164,6 +100,124 @@ function resolveWaitSeconds(options) {
     throw new Error(`Invalid --wait-timeout "${raw}". Expected a positive number of seconds.`);
   }
   return seconds;
+}
+
+// ---------------------------------------------------------------------------
+// Job execution. Every run (foreground or background) executes in a detached
+// worker that owns the job's lifecycle; the launching process only waits.
+// ---------------------------------------------------------------------------
+
+function renderJobOutput(job, response) {
+  if (job.kind !== "review" && job.kind !== "adversarial-review") {
+    return response || "(Antigravity returned an empty response.)";
+  }
+  const title = REVIEW_TITLES[job.kind];
+  const payload = extractReviewPayload(response);
+  return payload ? renderReviewMarkdown(title, job.request.targetLabel, payload) : renderRawReview(title, job.request.targetLabel, response);
+}
+
+function summarize(job, response) {
+  if (job.kind === "review" || job.kind === "adversarial-review") {
+    const payload = extractReviewPayload(response);
+    if (payload) {
+      return `${payload.verdict}: ${payload.findings.length} finding(s)`;
+    }
+  }
+  return String(response ?? "").split(/\r?\n/).find((line) => line.trim()) ?? "";
+}
+
+async function executeJob(workspace, job) {
+  let agyChild = null;
+  const onTerminate = (sig) => {
+    updateJob(workspace, job.id, { status: "cancelled", finishedAt: nowIso(), error: `Worker received ${sig}.` });
+    if (agyChild?.pid) {
+      killTree(agyChild.pid, { graceMs: 2000 });
+    }
+    process.exit(1);
+  };
+  process.once("SIGTERM", onTerminate);
+  process.once("SIGINT", onTerminate);
+  process.once("SIGHUP", onTerminate);
+
+  const running = updateJob(workspace, job.id, {
+    status: "running",
+    startedAt: nowIso(),
+    pid: process.pid,
+    pidStart: processStartTime(process.pid),
+  });
+  if (running.status !== "running") {
+    return running;
+  }
+
+  const before = job.write ? null : workspaceFingerprint(job.request.runCwd);
+  try {
+    const result = await runAgy(job.request.runCwd, job.request.agyArgs, {
+      onSpawn: (child) => {
+        agyChild = child;
+        updateJob(workspace, job.id, { agyPid: child.pid, agyPidStart: processStartTime(child.pid) });
+      },
+    });
+    const modified = before ? diffFingerprints(before, workspaceFingerprint(job.request.runCwd)) : [];
+    if (modified.length > 0) {
+      return updateJob(workspace, job.id, {
+        status: "failed",
+        finishedAt: nowIso(),
+        conversationId: result.conversationId,
+        rawOutput: result.response,
+        modifiedFiles: modified,
+        error: `Read-only run modified the workspace (${modified.length} path(s)): ${modified.slice(0, 20).join(", ")}. Review and revert with git if unintended.`,
+      });
+    }
+    return updateJob(workspace, job.id, {
+      status: "completed",
+      finishedAt: nowIso(),
+      conversationId: result.conversationId,
+      usage: result.usage,
+      warnings: result.warnings,
+      rawOutput: result.response,
+      output: renderJobOutput(job, result.response),
+      summary: summarize(job, result.response),
+    });
+  } catch (error) {
+    return updateJob(workspace, job.id, { status: "failed", finishedAt: nowIso(), error: error.message });
+  }
+}
+
+function launchWorker(workspace, job) {
+  const logFd = fs.openSync(jobLogFile(workspace, job.id), "a");
+  const child = spawn(process.execPath, [SCRIPT_PATH, "_worker", job.id, "--cwd", workspace], {
+    cwd: workspace,
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    env: process.env,
+    windowsHide: true,
+  });
+  child.unref();
+  fs.closeSync(logFd);
+}
+
+function jobResultJson(job) {
+  return JSON.stringify(
+    {
+      jobId: job.id,
+      status: job.status,
+      conversationId: job.conversationId ?? null,
+      rawOutput: job.rawOutput ?? null,
+      error: job.error ?? null,
+      modifiedFiles: job.modifiedFiles ?? [],
+    },
+    null,
+    2
+  );
+}
+
+async function waitForJob(workspace, id, deadline) {
+  let job = getJob(workspace, id);
+  while (job && ACTIVE_STATUSES.has(job.status) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    job = getJob(workspace, id);
+  }
+  return job;
 }
 
 async function submitJob({ kind, title, write, runCwd, agyArgs, targetLabel, background, json, waitSeconds }) {
@@ -179,62 +233,39 @@ async function submitJob({ kind, title, write, runCwd, agyArgs, targetLabel, bac
     request: { runCwd, agyArgs, targetLabel },
   };
   saveJob(workspace, job);
+  launchWorker(workspace, job);
 
   if (background) {
-    launchWorker(workspace, job);
-    if (json) {
-      out(JSON.stringify({ jobId: job.id, status: "queued", background: true }, null, 2));
-      return;
-    }
     out(
-      [
-        `Antigravity ${kind} started in the background as ${job.id}.`,
-        `Check progress with /agy:status ${job.id}; fetch output with /agy:result ${job.id}.`,
-      ].join("\n")
+      json
+        ? JSON.stringify({ jobId: job.id, status: "queued", background: true }, null, 2)
+        : [
+            `Antigravity ${kind} started in the background as ${job.id}.`,
+            `Check progress with /agy:status ${job.id}; fetch output with /agy:result ${job.id}.`,
+          ].join("\n")
     );
-    return;
+    return job;
   }
 
-  // Foreground runs still execute in a detached worker. Claude Code's Bash tool
-  // kills commands after its timeout (2 min by default, 10 max), and agy runs
-  // often take longer; waiting with a deadline lets us hand back a job id
-  // instead of dying silently and losing the run.
-  launchWorker(workspace, job);
-  const deadline = Date.now() + waitSeconds * 1000;
-  let finished = getJob(workspace, job.id);
-  while ((finished.status === "queued" || finished.status === "running") && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    finished = getJob(workspace, job.id);
-  }
+  // Claude Code's Bash tool kills commands after its timeout (2 min default,
+  // 10 max) and agy runs often take longer: wait with a deadline and hand
+  // back the job id instead of dying silently and losing the run.
+  const finished = await waitForJob(workspace, job.id, Date.now() + waitSeconds * 1000);
 
-  if (finished.status === "queued" || finished.status === "running") {
-    if (json) {
-      out(JSON.stringify({ jobId: finished.id, status: finished.status, conversationId: null, rawOutput: null, error: null }, null, 2));
-    } else {
-      out(
-        [
-          `Antigravity ${kind} ${finished.id} is still running after ${waitSeconds}s; it continues in the background.`,
-          `Check progress with /agy:status ${finished.id}; fetch output with /agy:result ${finished.id}.`,
-        ].join("\n")
-      );
-    }
-    return;
+  if (ACTIVE_STATUSES.has(finished.status)) {
+    out(
+      json
+        ? jobResultJson(finished)
+        : [
+            `Antigravity ${kind} ${finished.id} is still running after ${waitSeconds}s; it continues in the background.`,
+            `Check progress with /agy:status ${finished.id}; fetch output with /agy:result ${finished.id}.`,
+          ].join("\n")
+    );
+    return finished;
   }
 
   if (json) {
-    out(
-      JSON.stringify(
-        {
-          jobId: finished.id,
-          status: finished.status,
-          conversationId: finished.conversationId ?? null,
-          rawOutput: finished.rawOutput ?? null,
-          error: finished.error ?? null,
-        },
-        null,
-        2
-      )
-    );
+    out(jobResultJson(finished));
   } else if (finished.status === "completed") {
     out(finished.output);
   } else {
@@ -243,6 +274,7 @@ async function submitJob({ kind, title, write, runCwd, agyArgs, targetLabel, bac
   if (finished.status !== "completed") {
     process.exitCode = 1;
   }
+  return finished;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,25 +301,24 @@ async function handleSetup(rawArgs) {
   let authenticated = null;
   let authDetail = null;
   if (agy.available) {
-    const models = spawnSync(agy.bin, ["models"], { encoding: "utf8", timeout: 60000 });
+    const models = runAgySync(["models"], { timeout: 60000 });
     authenticated = models.status === 0 && /\S+\t\S+/.test(models.stdout ?? "");
     if (!authenticated) {
       authDetail = (models.stderr || models.stdout || models.error?.message || "").trim().split("\n").slice(-3).join(" ");
     }
   }
-  const git = spawnSync("git", ["--version"], { encoding: "utf8" });
-  const npm = spawnSync("npm", ["--version"], { encoding: "utf8" });
+  const git = runGitVersion();
 
   const report = {
-    ready: agy.available && authenticated !== false && git.status === 0,
+    ready: agy.available && authenticated !== false && Boolean(git),
     agy: { available: agy.available, binary: agy.bin, version: agy.version, detail: agy.detail },
     authenticated,
     authDetail,
-    git: git.status === 0 ? git.stdout.trim() : null,
+    git,
     node: process.version,
-    npmAvailable: npm.status === 0,
     workspace,
     stateDir: resolveStateDir(workspace),
+    writeMode: process.env.AGY_WRITE_MODE || "default",
     stopReviewGate: getConfig(workspace).stopReviewGate,
   };
 
@@ -302,6 +333,7 @@ async function handleSetup(rawArgs) {
       `- Signed in: ${authenticated === null ? "unknown" : authenticated ? "yes" : "no"}`,
       `- Git: ${report.git ?? "not found"}`,
       `- Node: ${report.node}`,
+      `- Write mode: agy ${report.writeMode} mode (set AGY_WRITE_MODE=auto|accept-edits to change)`,
       `- Stop-time review gate: ${report.stopReviewGate ? "enabled" : "disabled"} for ${workspace}`,
     ];
     if (!agy.available) {
@@ -319,12 +351,21 @@ async function handleSetup(rawArgs) {
   }
 }
 
+function runGitVersion() {
+  const res = spawnSync("git", ["--version"], { encoding: "utf8", windowsHide: true });
+  return res.status === 0 ? res.stdout.trim() : null;
+}
+
+function lastTaskConversation(workspace) {
+  return latestJob(workspace, (job) => job.kind === "task" && job.conversationId);
+}
+
 function resolveContinuation(workspace, options) {
   if (options.conversation) {
     return { conversationId: options.conversation };
   }
   if (options.resume || options.resumeLast) {
-    const previous = latestJob(workspace, (job) => job.kind === "task" && job.conversationId);
+    const previous = lastTaskConversation(workspace);
     if (previous) {
       return { conversationId: previous.conversationId };
     }
@@ -333,7 +374,7 @@ function resolveContinuation(workspace, options) {
   return {};
 }
 
-async function handleTask(rawArgs) {
+async function handleTask(rawArgs, { kind = "task" } = {}) {
   const { options, positionals } = parseCommandInput(rawArgs, {
     valueFlags: ["model", "effort", "cwd", "promptFile", "conversation", "timeout", "waitTimeout"],
     booleanFlags: ["write", "readOnly", "resume", "resumeLast", "fresh", "json", "background", "wait"],
@@ -346,6 +387,9 @@ async function handleTask(rawArgs) {
   }
   if (options.write && options.readOnly) {
     throw new Error("Choose either --write or --read-only, not both.");
+  }
+  if (kind === "gate" && options.write) {
+    throw new Error("Gate runs are always read-only.");
   }
 
   const runCwd = resolveCwd(options);
@@ -361,13 +405,13 @@ async function handleTask(rawArgs) {
     model: options.model,
     effort: options.effort,
     timeout: options.timeout,
-    ...resolveContinuation(workspace, options),
+    ...(kind === "gate" ? {} : resolveContinuation(workspace, options)),
     prompt: `${promptText}\n${write ? WRITE_SUFFIX : READ_ONLY_SUFFIX}`,
   });
 
-  await submitJob({
-    kind: "task",
-    title: promptText.split(/\r?\n/).find((line) => line.trim()) ?? "task",
+  return submitJob({
+    kind,
+    title: promptText.split(/\r?\n/).find((line) => line.trim()) ?? kind,
     write,
     runCwd,
     agyArgs,
@@ -400,15 +444,17 @@ async function handleReview(kind, rawArgs) {
     hasPromptFile: Boolean(options.promptFile),
   });
 
+  const boundary = newBoundary();
+  const defaultFocus = kind === "adversarial-review" ? "full adversarial engineering review" : "general correctness review";
   const prompt = interpolateTemplate(readPromptTemplate(kind), {
     TARGET_LABEL: context.label,
-    USER_FOCUS: focusText || (kind === "adversarial-review" ? "full adversarial engineering review" : "general correctness review"),
+    USER_FOCUS: context.mode === "prompt" ? "see the brief in the review input" : focusText ? wrapUntrusted(boundary, [focusText]) : defaultFocus,
     REVIEW_COLLECTION_GUIDANCE: buildReviewCollectionGuidance(context),
-    REVIEW_INPUT: buildReviewInputSection(context),
+    REVIEW_INPUT: buildReviewInputSection(context, boundary),
   });
 
-  // agy --json-schema rejects draft 2020-12 schemas when tools are active, so
-  // the output contract lives in the prompt and extractJsonObject() parses it.
+  // agy --json-schema rejects schemas when tools are active, so the output
+  // contract lives in the prompt and extractReviewPayload() validates it.
   const agyArgs = buildAgyArgs({
     write: false,
     model: options.model,
@@ -417,7 +463,7 @@ async function handleReview(kind, rawArgs) {
     prompt: `${prompt}\n${READ_ONLY_SUFFIX}`,
   });
 
-  await submitJob({
+  return submitJob({
     kind,
     title: `${context.label}${focusText ? ` — ${focusText}` : ""}`,
     write: false,
@@ -430,7 +476,12 @@ async function handleReview(kind, rawArgs) {
   });
 }
 
-function handleStatus(rawArgs) {
+function stripRequest(job) {
+  const { request, output, rawOutput, ...rest } = job;
+  return rest;
+}
+
+async function handleStatus(rawArgs) {
   const { options, positionals } = parseCommandInput(rawArgs, {
     valueFlags: ["cwd", "timeoutMs"],
     booleanFlags: ["json", "all", "wait"],
@@ -445,27 +496,25 @@ function handleStatus(rawArgs) {
       throw new Error(`No Antigravity job "${jobId}" in this workspace.`);
     }
     if (options.wait) {
-      const deadline = Date.now() + Number(options.timeoutMs ?? 10 * 60 * 1000);
-      while ((job.status === "running" || job.status === "queued") && Date.now() < deadline) {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
-        job = getJob(workspace, jobId);
+      const timeoutMs = Number(options.timeoutMs ?? 10 * 60 * 1000);
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        throw new Error(`Invalid --timeout-ms "${options.timeoutMs}".`);
+      }
+      job = (await waitForJob(workspace, jobId, Date.now() + timeoutMs)) ?? job;
+      if (ACTIVE_STATUSES.has(job.status)) {
+        process.exitCode = 2;
       }
     }
     out(options.json ? JSON.stringify(stripRequest(job), null, 2) : renderJobDetail(job));
     return;
   }
 
-  const jobs = listJobs(workspace).slice(0, options.all ? undefined : 10);
+  const jobs = listJobs(workspace, { includeGate: Boolean(options.all) }).slice(0, options.all ? undefined : 10);
   if (options.json) {
     out(JSON.stringify(jobs.map(stripRequest), null, 2));
     return;
   }
   out(renderJobsTable(jobs, { gateEnabled: getConfig(workspace).stopReviewGate }));
-}
-
-function stripRequest(job) {
-  const { request, output, rawOutput, ...rest } = job;
-  return rest;
 }
 
 function pickJob(workspace, jobId, predicate) {
@@ -486,14 +535,14 @@ function pickJob(workspace, jobId, predicate) {
 function handleResult(rawArgs) {
   const { options, positionals } = parseCommandInput(rawArgs, { valueFlags: ["cwd"], booleanFlags: ["json"] });
   const workspace = resolveWorkspaceRoot(resolveCwd(options));
-  const job = pickJob(workspace, positionals[0], (candidate) => candidate.status !== "running" && candidate.status !== "queued");
+  const job = pickJob(workspace, positionals[0], (candidate) => !ACTIVE_STATUSES.has(candidate.status));
 
   if (options.json) {
     const { request, ...rest } = job;
     out(JSON.stringify(rest, null, 2));
     return;
   }
-  if (job.status === "running" || job.status === "queued") {
+  if (ACTIVE_STATUSES.has(job.status)) {
     out(`Job ${job.id} is still ${job.status}. Check /agy:status ${job.id}.`);
     return;
   }
@@ -501,54 +550,53 @@ function handleResult(rawArgs) {
   if (job.conversationId) {
     header.push(`Antigravity conversation: ${job.conversationId}`);
   }
+  for (const warning of job.warnings ?? []) {
+    header.push(`agy ${warning}`);
+  }
   if (job.status === "completed") {
     out([...header, "", job.output].join("\n"));
-  } else {
-    out([...header, "", `Error: ${job.error ?? "no output recorded"}`].join("\n"));
-    process.exitCode = 1;
+    return;
   }
+  const body = [...header, "", `Error: ${job.error ?? "no output recorded"}`];
+  if (job.rawOutput) {
+    body.push("", "Antigravity output:", job.rawOutput);
+  }
+  out(body.join("\n"));
+  process.exitCode = 1;
 }
 
-function killPid(pid, { group = false } = {}) {
-  if (!pid || !isProcessAlive(pid)) {
-    return false;
+export function cancelJob(workspace, job) {
+  const updated = updateJob(workspace, job.id, { status: "cancelled", finishedAt: nowIso(), error: "Cancelled by user." });
+  if (updated.status !== "cancelled") {
+    return { cancelled: false, status: updated.status };
   }
-  try {
-    process.kill(group ? -pid : pid, "SIGTERM");
-    return true;
-  } catch {
-    try {
-      process.kill(pid, "SIGTERM");
-      return true;
-    } catch {
-      return false;
-    }
-  }
+  // Only signal processes whose identity (pid + start time) still matches.
+  const killedWorker = job.pid && job.pidStart && processStartTime(job.pid) === job.pidStart ? killTree(job.pid, { group: true }) : false;
+  const killedAgy =
+    job.agyPid && job.agyPidStart && processStartTime(job.agyPid) === job.agyPidStart ? killTree(job.agyPid) : false;
+  return { cancelled: true, killedWorker, killedAgy };
 }
 
 function handleCancel(rawArgs) {
   const { options, positionals } = parseCommandInput(rawArgs, { valueFlags: ["cwd"], booleanFlags: ["json"] });
   const workspace = resolveWorkspaceRoot(resolveCwd(options));
-  const job = pickJob(workspace, positionals[0], (candidate) => candidate.status === "running" || candidate.status === "queued");
+  const job = pickJob(workspace, positionals[0], (candidate) => ACTIVE_STATUSES.has(candidate.status));
 
-  if (job.status !== "running" && job.status !== "queued") {
+  if (!ACTIVE_STATUSES.has(job.status)) {
     out(`Job ${job.id} is already ${job.status}; nothing to cancel.`);
     return;
   }
-  updateJob(workspace, job.id, { status: "cancelled", finishedAt: nowIso(), error: "Cancelled by user." });
-  const killedAgy = killPid(job.agyPid);
-  const killedWorker = job.logFile ? killPid(job.pid, { group: true }) : false;
-  out(
-    options.json
-      ? JSON.stringify({ jobId: job.id, status: "cancelled", killedAgy, killedWorker }, null, 2)
-      : `Cancelled Antigravity job ${job.id}.`
-  );
+  const result = cancelJob(workspace, job);
+  if (options.json) {
+    out(JSON.stringify({ jobId: job.id, ...result }, null, 2));
+  } else {
+    out(result.cancelled ? `Cancelled Antigravity job ${job.id}.` : `Job ${job.id} already finished (${result.status}).`);
+  }
 }
 
 function handleResumeCandidate(rawArgs) {
   const { options } = parseCommandInput(rawArgs, { valueFlags: ["cwd"], booleanFlags: ["json"] });
-  const workspace = resolveWorkspaceRoot(resolveCwd(options));
-  const previous = latestJob(workspace, (job) => job.kind === "task" && job.conversationId);
+  const previous = lastTaskConversation(resolveWorkspaceRoot(resolveCwd(options)));
   const payload = previous
     ? { available: true, jobId: previous.id, conversationId: previous.conversationId, title: previous.title, finishedAt: previous.finishedAt }
     : { available: false };
@@ -559,7 +607,7 @@ async function handleWorker(rawArgs) {
   const { options, positionals } = parseCommandInput(rawArgs, { valueFlags: ["cwd"] });
   const workspace = resolveWorkspaceRoot(resolveCwd(options));
   const job = getJob(workspace, positionals[0]);
-  if (!job || job.status === "cancelled") {
+  if (!job || job.status !== "queued") {
     return;
   }
   await executeJob(workspace, job);
@@ -573,8 +621,8 @@ function printHelp() {
       "Subcommands:",
       "  setup [--json] [--enable-review-gate|--disable-review-gate]",
       "  task [--write|--read-only] [--resume|--fresh] [--conversation <id>] [--model <m>] [--effort <low|medium|high|xhigh|max>] [--timeout <dur>] [--background] [--wait-timeout <secs>] [--prompt-file <path>] [--json] [prompt]",
-      "  review [--base <ref>] [--scope auto|working-tree|branch|decision] [--background] [--json] [focus]",
-      "  adversarial-review [--base <ref>] [--scope auto|working-tree|branch|decision] [--prompt-file <path>] [--background] [--json] [focus or decision brief]",
+      "  review [--base <ref>] [--scope auto|working-tree|branch|decision] [--background] [--wait-timeout <secs>] [--json] [focus]",
+      "  adversarial-review [--base <ref>] [--scope auto|working-tree|branch|decision] [--prompt-file <path>] [--background] [--wait-timeout <secs>] [--json] [focus or decision brief]",
       "  status [job-id] [--wait] [--timeout-ms <ms>] [--all] [--json]",
       "  result [job-id] [--json]",
       "  cancel [job-id] [--json]",
@@ -585,19 +633,24 @@ function printHelp() {
   );
 }
 
+// Subcommands without free text always receive a packed "$ARGUMENTS".
+const ALWAYS_SPLIT = new Set(["setup", "status", "result", "cancel", "task-resume-candidate"]);
+
 async function main() {
   const [subcommand, ...rest] = process.argv.slice(2);
-  const args = normalizeArgv(rest);
   if (!subcommand || ["--help", "-h", "help"].includes(subcommand)) {
     printHelp();
     return;
   }
+  const args = normalizeArgv(rest, { alwaysSplit: ALWAYS_SPLIT.has(subcommand) });
 
   switch (subcommand) {
     case "setup":
       return handleSetup(args);
     case "task":
       return handleTask(args);
+    case "_gate":
+      return handleTask(args, { kind: "gate" });
     case "review":
     case "adversarial-review":
       return handleReview(subcommand, args);
@@ -616,7 +669,17 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`Error: ${error.message}\n`);
-  process.exitCode = 1;
-});
+function isEntryPoint() {
+  try {
+    return Boolean(process.argv[1]) && fs.realpathSync(process.argv[1]) === fs.realpathSync(SCRIPT_PATH);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  main().catch((error) => {
+    process.stderr.write(`Error: ${error.message}\n`);
+    process.exitCode = 1;
+  });
+}

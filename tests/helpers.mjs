@@ -10,19 +10,23 @@ export const COMPANION = path.join(ROOT, "plugins/agy/scripts/agy-companion.mjs"
 export const STOP_HOOK = path.join(ROOT, "plugins/agy/scripts/stop-review-gate-hook.mjs");
 export const FAKE_AGY = path.join(here, "fake-agy.mjs");
 
-export function makeSandbox({ git = true } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-plugin-test-"));
+export function git(repo, ...args) {
+  return spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+}
+
+export function makeSandbox({ git: withGit = true } = {}) {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-plugin-test-")));
   const repo = path.join(dir, "repo");
   fs.mkdirSync(repo);
-  if (git) {
-    const run = (...args) => spawnSync("git", args, { cwd: repo, encoding: "utf8" });
-    run("init", "-q", "-b", "main");
-    run("config", "user.email", "test@example.com");
-    run("config", "user.name", "Test");
-    run("config", "commit.gpgsign", "false");
+  if (withGit) {
+    git(repo, "init", "-q", "-b", "main");
+    git(repo, "config", "user.email", "test@example.com");
+    git(repo, "config", "user.name", "Test");
+    git(repo, "config", "commit.gpgsign", "false");
+    git(repo, "config", "core.autocrlf", "false");
     fs.writeFileSync(path.join(repo, "app.js"), "export const add = (a, b) => a + b;\n");
-    run("add", ".");
-    run("commit", "-q", "-m", "init");
+    git(repo, "add", ".");
+    git(repo, "commit", "-q", "-m", "init");
   }
   const env = {
     ...process.env,
@@ -30,7 +34,15 @@ export function makeSandbox({ git = true } = {}) {
     AGY_COMPANION_STATE_DIR: path.join(dir, "state"),
     FAKE_AGY_LOG: path.join(dir, "agy.log"),
   };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("FAKE_AGY_") && key !== "FAKE_AGY_LOG") {
+      delete env[key];
+    }
+  }
   delete env.AGY_COMPANION_DEPTH;
+  delete env.AGY_WRITE_MODE;
+  delete env.AGY_FOREGROUND_WAIT_SECS;
+  delete env.AGY_MAX_RUN_SECS;
   return { dir, repo, env };
 }
 
@@ -40,6 +52,15 @@ export function companion(sandbox, args, extraEnv = {}, input) {
     env: { ...sandbox.env, ...extraEnv },
     encoding: "utf8",
     input,
+  });
+}
+
+export function runHook(sandbox, mode, input, extraEnv = {}) {
+  return spawnSync(process.execPath, [STOP_HOOK, mode], {
+    cwd: sandbox.repo,
+    env: { ...sandbox.env, ...extraEnv },
+    input: JSON.stringify({ cwd: sandbox.repo, session_id: "sess-1", ...input }),
+    encoding: "utf8",
   });
 }
 
@@ -56,7 +77,15 @@ export function agyCalls(sandbox) {
     .filter((call) => call.args.includes("-p"));
 }
 
-export async function waitFor(predicate, timeoutMs = 10000) {
+export function jobIdFrom(text) {
+  return String(text).match(/((?:task|rev|adv|gate)-[a-z0-9]+-[a-f0-9]+)/)?.[1];
+}
+
+export function statusJson(sandbox, id) {
+  return JSON.parse(companion(sandbox, ["status", id, "--json"]).stdout);
+}
+
+export async function waitFor(predicate, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) {
@@ -65,4 +94,13 @@ export async function waitFor(predicate, timeoutMs = 10000) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return false;
+}
+
+export function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }

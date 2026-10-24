@@ -14,8 +14,8 @@ Primary helper:
 
 What the helper does:
 - Runs `agy -p` non-interactively with `--output-format json` and `--dangerously-skip-permissions`.
-- `--write` → `agy --mode auto` (Antigravity may edit files and run commands).
-- `--read-only` (default without `--write`) → `agy --mode plan` (no edits).
+- `--write` → agy default mode (Antigravity may edit files and run commands; `AGY_WRITE_MODE` can select `auto` / `accept-edits`).
+- `--read-only` (default without `--write`) → `agy --mode plan --sandbox`. Shell writes are blocked by the OS sandbox; file-tool writes are detected by a before/after workspace fingerprint and fail the job.
 - Records every run as a job (`/agy:status`, `/agy:result`, `/agy:cancel`) and remembers the Antigravity conversation ID for `--resume-last`.
 - `--background` detaches the run and returns a job ID immediately.
 - Foreground runs wait up to 540s (`--wait-timeout <secs>`), then return a "still running" message with the job ID while the run continues in the background.

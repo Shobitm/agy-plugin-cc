@@ -45,24 +45,34 @@ export function parseCommandInput(rawArgv, options = {}) {
   return { options: parsedOptions, positionals };
 }
 
-// Slash commands pass "$ARGUMENTS" as one quoted string. Split it back into
-// argv tokens, honouring simple single/double quoting.
+// Slash commands hand "$ARGUMENTS" over as one string. Split it back into
+// argv tokens. A quote only opens at the start of a token, so apostrophes in
+// prose ("don't") stay literal, and a backslash escapes the next character.
 export function splitRawArgumentString(raw) {
   const tokens = [];
   let current = "";
   let quote = null;
   let hasToken = false;
+  const chars = [...String(raw ?? "")];
 
-  for (const ch of String(raw ?? "")) {
+  for (let i = 0; i < chars.length; i += 1) {
+    const ch = chars[i];
     if (quote) {
-      if (ch === quote) {
+      if (ch === "\\" && quote === '"' && i + 1 < chars.length) {
+        current += chars[(i += 1)];
+      } else if (ch === quote) {
         quote = null;
       } else {
         current += ch;
       }
       continue;
     }
-    if (ch === '"' || ch === "'") {
+    if (ch === "\\" && i + 1 < chars.length) {
+      current += chars[(i += 1)];
+      hasToken = true;
+      continue;
+    }
+    if ((ch === '"' || ch === "'") && !hasToken) {
       quote = ch;
       hasToken = true;
       continue;
@@ -84,14 +94,20 @@ export function splitRawArgumentString(raw) {
   return tokens;
 }
 
-// A single argv element that contains whitespace and starts with a flag is a
-// packed "$ARGUMENTS" string; anything else is already proper argv.
-export function normalizeArgv(argv) {
-  if (argv.length === 1 && /^\s*--/.test(argv[0]) && /\s/.test(argv[0].trim())) {
-    return splitRawArgumentString(argv[0]);
+// `alwaysSplit` is for subcommands that take no free text (status, result,
+// cancel, setup): a single argv element is always a packed "$ARGUMENTS".
+// Free-text subcommands only unpack a single element that starts with a flag,
+// so a prompt passed as one proper argv element is left intact.
+export function normalizeArgv(argv, { alwaysSplit = false } = {}) {
+  if (argv.length !== 1) {
+    return argv;
   }
-  if (argv.length === 1 && argv[0].trim() === "") {
+  const [only] = argv;
+  if (only.trim() === "") {
     return [];
+  }
+  if (alwaysSplit || (/^\s*--/.test(only) && /\s/.test(only.trim()))) {
+    return splitRawArgumentString(only);
   }
   return argv;
 }

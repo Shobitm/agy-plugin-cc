@@ -23,7 +23,7 @@ Plus:
 
 - Google Antigravity with the `agy` CLI on `PATH` (or at `~/.local/bin/agy`, or set `AGY_BIN`). Tested with agy 1.4.x.
 - Signed in to Antigravity (run `agy` once interactively).
-- Node.js 18.18+ and git.
+- Node.js 18.18+ and git. macOS, Linux and Windows (CI runs all three).
 
 Usage counts against your Antigravity plan.
 
@@ -41,9 +41,9 @@ From GitHub:
 From a release tarball (offline / air-gapped):
 
 ```bash
-tar -xzf agy-plugin-cc-0.1.1.tar.gz -C ~/plugins
+tar -xzf agy-plugin-cc-0.2.0.tar.gz -C ~/plugins
 # in Claude Code:
-/plugin marketplace add ~/plugins/agy-plugin-cc-0.1.1
+/plugin marketplace add ~/plugins/agy-plugin-cc-0.2.0
 /plugin install agy@agy-plugin-cc
 /reload-plugins
 /agy:setup
@@ -84,7 +84,7 @@ Returns a verdict (`approve` / `needs-attention`) and severity-ordered findings 
 /agy:rescue --effort high --model gemini-3.1-pro-high ...
 ```
 
-- Writes by default (`agy --mode auto`); `--read-only` uses `agy --mode plan`.
+- Writes by default (agy's default mode); `--read-only` uses `agy --mode plan --sandbox` with an integrity check (see below).
 - If a previous rescue conversation exists in this repo, Claude asks whether to continue it or start fresh.
 - `agy models` lists model IDs.
 
@@ -104,20 +104,31 @@ Returns a verdict (`approve` / `needs-attention`) and severity-ordered findings 
 /agy:setup --disable-review-gate
 ```
 
-When enabled for a repo, each time Claude is about to stop, Antigravity checks that turn's edits and can block the stop with a reason. It adds a minute or more per turn — leave it off unless you want it.
+When enabled for a repo, each time Claude is about to stop after a turn that changed files, Antigravity reviews those files and can block the stop with a reason. Turns with no edits are skipped. Each reviewed turn adds a minute or more — leave it off unless you want it.
 
 ## How it works
 
-Everything goes through `plugins/agy/scripts/agy-companion.mjs`, which calls:
+Everything goes through `plugins/agy/scripts/agy-companion.mjs`, which runs agy headless:
 
 ```text
-agy --mode plan|auto --dangerously-skip-permissions --output-format json -p "<prompt>"
+read-only:  agy --mode plan --sandbox --dangerously-skip-permissions --output-format json -p "<prompt>"
+write:      agy [--mode $AGY_WRITE_MODE] --dangerously-skip-permissions --output-format json -p "<prompt>"
 ```
 
-- Read-only runs use `--mode plan`. The companion deliberately does **not** pass `--disable-slash-commands`: in agy 1.4.x that flag makes `--mode plan` a silent no-op, so a "read-only" run could edit files. Instead, a leading `/` in a prompt is neutralised.
-- Review output is a JSON contract in the prompt (`schemas/review-output.schema.json`), parsed and rendered as Markdown. `agy --json-schema` isn't used because it rejects schemas when tools are active.
-- `AGY_COMPANION_DEPTH` is set on every agy child, so a companion launched from inside Antigravity refuses to recurse.
-- Job state lives in `$XDG_STATE_HOME/agy-plugin-cc` (default `~/.local/state/agy-plugin-cc`), one folder per repo. Override with `AGY_COMPANION_STATE_DIR`.
+**What "read-only" does and does not guarantee** (measured against agy 1.4.7):
+- `--sandbox` makes the OS block writes from shell commands (`touch: Operation not permitted`).
+- agy's own file-write tool is *not* blocked by `--mode plan` or `--sandbox`, and headless agy cannot prompt: without `--dangerously-skip-permissions` every shell command (even `git diff`) is auto-denied and the run aborts with no output.
+- So the companion fingerprints the workspace before and after each read-only run (git: HEAD plus content hashes of every changed/untracked file; otherwise size+mtime of files). Any difference fails the job and lists the touched paths. This **detects** writes; it does not prevent them. Use git to revert.
+- Repository content in review prompts (diffs, commit messages, untracked files, your brief) is wrapped in a random-boundary block the prompt marks as inert data, and fences are sized so content cannot close them. This raises the bar for prompt injection; it is not a guarantee.
+- `--disable-slash-commands` is not used: it silently disables `--mode plan`. A leading `/` in a prompt is neutralised instead.
+
+**Jobs.** Every run, foreground or background, executes in a detached worker that owns its job record. Foreground commands wait up to 540s (`--wait-timeout`), then hand back the job ID, so Claude Code's Bash timeout can't kill a run mid-flight. Job records are updated under a lock file; `cancelled` is terminal (a late result can't overwrite it). Cancel only signals a process whose PID *and* start time still match, then escalates SIGTERM → SIGKILL across the worker's process group (`taskkill /T` on Windows).
+
+**Stop gate.** A `UserPromptSubmit` hook fingerprints the workspace at the start of each turn; the `Stop` hook reviews only files that changed during the turn and skips turns with no edits. Gate runs are recorded as their own `gate` kind, so they never hijack `--resume`, `/agy:result`, or the job history. If agy fails, times out (780s, then the job is cancelled), or answers neither ALLOW nor BLOCK, the stop goes through with a visible warning instead of looping.
+
+**Output.** agy's JSON envelope is parsed strictly (anything unparseable is a failure, never a silent success). Review JSON is taken from the last valid candidate in the output and validated against `schemas/review-output.schema.json`.
+
+`AGY_COMPANION_DEPTH` is set on every agy child, so a companion launched from inside Antigravity refuses to recurse. State lives in `$XDG_STATE_HOME/agy-plugin-cc` (default `~/.local/state/agy-plugin-cc`, `%LOCALAPPDATA%\agy-plugin-cc\state` on Windows), one folder per repo; override with `AGY_COMPANION_STATE_DIR`.
 
 ### Using it from Codex or other agents
 
@@ -137,6 +148,9 @@ Prompt guidance for delegated tasks is in `plugins/agy/skills/agy-prompting/`.
 |---|---|
 | `AGY_BIN` | Path to the `agy` binary |
 | `AGY_COMPANION_STATE_DIR` | Override the job/config state directory |
+| `AGY_WRITE_MODE` | agy mode for `--write` runs: `default` (default), `auto`, `accept-edits` |
+| `AGY_FOREGROUND_WAIT_SECS` | How long foreground commands wait before handing back the job ID (default 540) |
+| `AGY_MAX_RUN_SECS` | Hard ceiling on one agy run before it is killed (default 7200) |
 | `XDG_STATE_HOME` | Base for the default state directory |
 
 ## Development

@@ -1,6 +1,6 @@
 {
   "name": "agy",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Use Google Antigravity (agy) from Claude Code to review code, challenge decisions, or delegate tasks.",
   "author": { "name": "Shobitm", "url": "https://github.com/Shobitm" },
   "homepage": "https://github.com/Shobitm/agy-plugin-cc",

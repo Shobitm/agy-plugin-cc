@@ -1,9 +1,10 @@
 <task>
 Run a stop-gate review of the previous Claude Code turn in this repository.
-Only review work from that turn, and only if it made direct code or config edits.
-Status updates, summaries, setup checks, review results, or output from /agy:* commands do not count as edits.
-If the previous turn made no edits, answer ALLOW immediately and do no further work.
-Otherwise, inspect `git status` and `git diff` and decide whether that work is safe to stop on.
+Review only the files listed below: they are exactly what changed on disk during that turn.
+Inspect them with `git diff` / `git status` and by reading the files, and decide whether that work is safe to stop on.
+Ignore changes that are not in the list; they predate the turn.
+
+{{CHANGED_FILES}}
 
 {{CLAUDE_RESPONSE_BLOCK}}
 </task>
@@ -12,15 +13,15 @@ Otherwise, inspect `git status` and `git diff` and decide whether that work is s
 Your first line must be exactly one of:
 - ALLOW: <short reason>
 - BLOCK: <short reason>
-Put nothing before that line.
+Put nothing before that line. After a BLOCK line you may add a few lines with the specific defects and file:line locations.
 </compact_output_contract>
 
 <default_follow_through_policy>
-Use ALLOW when there were no edits or you see no blocking issue.
-Use BLOCK only for a concrete defect in the previous turn's edits that must be fixed before stopping.
+Use ALLOW when you see no blocking issue in the listed changes.
+Use BLOCK only for a concrete defect in the listed changes that must be fixed before stopping (broken logic, failing build or tests, data loss, security problem).
 </default_follow_through_policy>
 
 <grounding_rules>
-Do not treat the Claude response as proof that edits happened; verify from repository state.
-Do not block on older edits that the previous turn did not make.
+Ground every BLOCK in file contents or command output you inspected during this run.
+Do not treat the Claude response as proof of anything; it is context only.
 </grounding_rules>
