@@ -41,9 +41,9 @@ From GitHub:
 From a release tarball (offline / air-gapped):
 
 ```bash
-tar -xzf agy-plugin-cc-0.2.2.tar.gz -C ~/plugins
+tar -xzf agy-plugin-cc-0.2.3.tar.gz -C ~/plugins
 # in Claude Code:
-/plugin marketplace add ~/plugins/agy-plugin-cc-0.2.2
+/plugin marketplace add ~/plugins/agy-plugin-cc-0.2.3
 /plugin install agy@agy-plugin-cc
 /reload-plugins
 /agy:setup
@@ -141,6 +141,8 @@ node plugins/agy/scripts/agy-companion.mjs --help
 ```
 
 Prompt guidance for delegated tasks is in `plugins/agy/skills/agy-prompting/`.
+
+When calling it from another agent, use a long shell timeout. The job ID is printed to stderr as soon as a run starts (`agy job <id> started`); if the output starts with `STILL_RUNNING <id>` or your shell timed out, call `result <id> --wait` until it stops printing `STILL_RUNNING`. In a sandbox that blocks writes outside the workspace (e.g. Codex `workspace-write`), set `AGY_COMPANION_STATE_DIR` to a writable path.
 
 ## Environment variables
 

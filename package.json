@@ -1,6 +1,6 @@
 {
   "name": "agy-plugin-cc",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "Use Google Antigravity (agy) from Claude Code to review code, challenge decisions, or delegate tasks.",

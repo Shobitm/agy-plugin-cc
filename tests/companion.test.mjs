@@ -370,3 +370,10 @@ test("a state dir inside the workspace is not mistaken for a read-only violation
     assert.equal(res.stdout.trim(), "clean");
   }
 });
+
+test("foreground runs announce the job id on stderr immediately", () => {
+  const sb = makeSandbox();
+  const res = companion(sb, ["task", "x"], { FAKE_AGY_RESPONSE: "ok" });
+  assert.match(res.stderr, /^agy job task-\S+ started \(collect with: result task-\S+ --wait\)/);
+  assert.equal(res.stdout.trim(), "ok");
+});

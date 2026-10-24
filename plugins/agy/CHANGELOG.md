@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- Foreground runs print `agy job <id> started` to stderr immediately, so the job can still be collected with `result <id> --wait` if the caller's shell kills the command early (e.g. a short agent shell timeout).
+
 ## 0.2.2
 
 - Windows: the read-only integrity check now resolves paths natively (short names such as `RUNNER~1`) when excluding the plugin's own state directory.

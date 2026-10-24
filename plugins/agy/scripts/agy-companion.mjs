@@ -249,6 +249,11 @@ async function submitJob({ kind, title, write, runCwd, agyArgs, targetLabel, bac
     return job;
   }
 
+  // Announce the job id at once: if the caller's shell kills this command
+  // before the deadline below, the id is already on screen and the detached
+  // run can still be collected with `result <id> --wait`.
+  process.stderr.write(`agy job ${job.id} started (collect with: result ${job.id} --wait)\n`);
+
   // Claude Code's Bash tool kills commands after its timeout (2 min default,
   // 10 max) and agy runs often take longer: wait with a deadline and hand
   // back the job id instead of dying silently and losing the run.
