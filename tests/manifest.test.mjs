@@ -10,7 +10,7 @@ const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
 function frontmatter(file) {
   const text = fs.readFileSync(file, "utf8");
-  const match = text.match(/^---\n([\s\S]*?)\n---\n/);
+  const match = text.replace(/\r\n/g, "\n").match(/^---\n([\s\S]*?)\n---\n/);
   assert.ok(match, `${file} has no frontmatter`);
   return Object.fromEntries(
     match[1]
