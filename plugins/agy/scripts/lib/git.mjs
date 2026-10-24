@@ -412,17 +412,26 @@ function walkFiles(root) {
 
 function realOrResolved(p) {
   try {
-    return fs.realpathSync(p);
+    return fs.realpathSync.native(p);
   } catch {
     return path.resolve(p);
   }
 }
 
+const toPosix = (p) => p.split(path.sep).join("/");
+
 // Paths under `exclude` (the companion's own state directory, which may sit
-// inside the workspace) are ignored.
+// inside the workspace) are ignored. Both sides are resolved natively so
+// Windows short names (RUNNER~1) and symlinked temp dirs compare equal.
 function excluder(root, exclude) {
-  const prefixes = exclude.map(realOrResolved).map((dir) => path.relative(realOrResolved(root), dir)).filter((rel) => rel && !rel.startsWith(".."));
-  return (rel) => !prefixes.some((prefix) => rel === prefix || rel.startsWith(prefix + path.sep) || rel.startsWith(prefix + "/"));
+  const base = realOrResolved(root);
+  const prefixes = exclude
+    .map((dir) => toPosix(path.relative(base, realOrResolved(dir))))
+    .filter((rel) => rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+  return (rel) => {
+    const posix = toPosix(rel);
+    return !prefixes.some((prefix) => posix === prefix || posix.startsWith(`${prefix}/`));
+  };
 }
 
 // Map of path -> content hash for every file that differs from HEAD (tracked
