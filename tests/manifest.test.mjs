@@ -60,3 +60,10 @@ test("no machine-specific paths are shipped", () => {
     assert.doesNotMatch(fs.readFileSync(file, "utf8"), /\/Users\/|\/home\/[a-z]/, file);
   }
 });
+
+test("rescue subagent never detaches the companion run", () => {
+  const agent = fs.readFileSync(path.join(PLUGIN, "agents/agy-rescue.md"), "utf8");
+  assert.match(agent, /Never pass `--background` to the companion/);
+  assert.match(agent, /result <job-id> --wait/);
+  assert.match(agent, /600000/);
+});

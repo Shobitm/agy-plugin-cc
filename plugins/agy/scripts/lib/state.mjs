@@ -22,7 +22,7 @@ export function resolveWorkspaceRoot(cwd) {
   return resolveGitRoot(cwd) || path.resolve(cwd);
 }
 
-function stateRoot() {
+export function stateRoot() {
   if (process.env.AGY_COMPANION_STATE_DIR) {
     return process.env.AGY_COMPANION_STATE_DIR;
   }

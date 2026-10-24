@@ -36,6 +36,7 @@ import {
   listJobs,
   newJobId,
   resolveStateDir,
+  stateRoot,
   resolveWorkspaceRoot,
   saveJob,
   setConfig,
@@ -149,7 +150,8 @@ async function executeJob(workspace, job) {
     return running;
   }
 
-  const before = job.write ? null : workspaceFingerprint(job.request.runCwd);
+  const fingerprint = () => workspaceFingerprint(job.request.runCwd, { exclude: [stateRoot()] });
+  const before = job.write ? null : fingerprint();
   try {
     const result = await runAgy(job.request.runCwd, job.request.agyArgs, {
       onSpawn: (child) => {
@@ -157,7 +159,7 @@ async function executeJob(workspace, job) {
         updateJob(workspace, job.id, { agyPid: child.pid, agyPidStart: processStartTime(child.pid) });
       },
     });
-    const modified = before ? diffFingerprints(before, workspaceFingerprint(job.request.runCwd)) : [];
+    const modified = before ? diffFingerprints(before, fingerprint()) : [];
     if (modified.length > 0) {
       return updateJob(workspace, job.id, {
         status: "failed",
@@ -257,8 +259,8 @@ async function submitJob({ kind, title, write, runCwd, agyArgs, targetLabel, bac
       json
         ? jobResultJson(finished)
         : [
-            `Antigravity ${kind} ${finished.id} is still running after ${waitSeconds}s; it continues in the background.`,
-            `Check progress with /agy:status ${finished.id}; fetch output with /agy:result ${finished.id}.`,
+            `STILL_RUNNING ${finished.id}: Antigravity ${kind} is still running after ${waitSeconds}s; it continues in the background.`,
+            `Keep waiting with \`result ${finished.id} --wait\`, check progress with /agy:status ${finished.id}, or fetch output later with /agy:result ${finished.id}.`,
           ].join("\n")
     );
     return finished;
@@ -532,10 +534,33 @@ function pickJob(workspace, jobId, predicate) {
   return job;
 }
 
-function handleResult(rawArgs) {
-  const { options, positionals } = parseCommandInput(rawArgs, { valueFlags: ["cwd"], booleanFlags: ["json"] });
+async function handleResult(rawArgs) {
+  const { options, positionals } = parseCommandInput(rawArgs, {
+    valueFlags: ["cwd", "timeoutMs"],
+    booleanFlags: ["json", "wait"],
+    aliases: { "--timeout-ms": "timeoutMs" },
+  });
   const workspace = resolveWorkspaceRoot(resolveCwd(options));
-  const job = pickJob(workspace, positionals[0], (candidate) => !ACTIVE_STATUSES.has(candidate.status));
+  let job = pickJob(workspace, positionals[0], (candidate) => !ACTIVE_STATUSES.has(candidate.status));
+
+  // `result <id> --wait` blocks until the job finishes (bounded so it fits in
+  // one Bash call); exit code 2 means "still running, call again".
+  if (options.wait && ACTIVE_STATUSES.has(job.status)) {
+    const timeoutMs = Number(options.timeoutMs ?? DEFAULT_FOREGROUND_WAIT_SECONDS * 1000);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error(`Invalid --timeout-ms "${options.timeoutMs}".`);
+    }
+    job = (await waitForJob(workspace, job.id, Date.now() + timeoutMs)) ?? job;
+    if (ACTIVE_STATUSES.has(job.status)) {
+      out(
+        options.json
+          ? JSON.stringify({ jobId: job.id, status: job.status }, null, 2)
+          : `STILL_RUNNING ${job.id}: Antigravity is still working. Run \`result ${job.id} --wait\` again to keep waiting.`
+      );
+      process.exitCode = 2;
+      return;
+    }
+  }
 
   if (options.json) {
     const { request, ...rest } = job;
@@ -624,7 +649,7 @@ function printHelp() {
       "  review [--base <ref>] [--scope auto|working-tree|branch|decision] [--background] [--wait-timeout <secs>] [--json] [focus]",
       "  adversarial-review [--base <ref>] [--scope auto|working-tree|branch|decision] [--prompt-file <path>] [--background] [--wait-timeout <secs>] [--json] [focus or decision brief]",
       "  status [job-id] [--wait] [--timeout-ms <ms>] [--all] [--json]",
-      "  result [job-id] [--json]",
+      "  result [job-id] [--wait] [--timeout-ms <ms>] [--json]",
       "  cancel [job-id] [--json]",
       "  task-resume-candidate [--json]",
       "",

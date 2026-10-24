@@ -3,13 +3,13 @@
   "owner": { "name": "Shobitm", "url": "https://github.com/Shobitm" },
   "metadata": {
     "description": "Google Antigravity (agy) plugins for Claude Code: review, adversarial review, and task delegation.",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "agy",
       "description": "Use Google Antigravity (agy) from Claude Code to review code, challenge decisions, or delegate tasks.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": { "name": "Shobitm" },
       "source": "./plugins/agy"
     }

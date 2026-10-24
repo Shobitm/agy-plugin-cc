@@ -334,3 +334,39 @@ test("status table renders follow-ups", () => {
   assert.match(res.stdout, /\| task-/);
   assert.match(res.stdout, /\/agy:result task-/);
 });
+
+test("result --wait blocks until the job finishes and returns its output", () => {
+  const sb = makeSandbox();
+  const first = companion(sb, ["task", "--wait-timeout", "1", "slow"], { FAKE_AGY_SLEEP_MS: "2500", FAKE_AGY_RESPONSE: "final answer" });
+  assert.match(first.stdout, /^STILL_RUNNING (task-\S+):/);
+  const jobId = jobIdFrom(first.stdout);
+  const res = companion(sb, ["result", jobId, "--wait", "--timeout-ms", "15000"]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /final answer/);
+});
+
+test("result --wait exits 2 with STILL_RUNNING when the wait expires", () => {
+  const sb = makeSandbox();
+  const jobId = jobIdFrom(companion(sb, ["task", "--background", "x"], { FAKE_AGY_SLEEP_MS: "30000" }).stdout);
+  const res = companion(sb, ["result", jobId, "--wait", "--timeout-ms", "300"]);
+  assert.equal(res.status, 2);
+  assert.match(res.stdout, new RegExp(`^STILL_RUNNING ${jobId}`));
+  companion(sb, ["cancel", jobId]);
+});
+
+test("packed result args from the slash command are unpacked", () => {
+  const sb = makeSandbox();
+  const jobId = jobIdFrom(companion(sb, ["task", "--background", "x"], { FAKE_AGY_SLEEP_MS: "200", FAKE_AGY_RESPONSE: "packed ok" }).stdout);
+  const res = companion(sb, ["result", `${jobId} --wait --timeout-ms 15000`]);
+  assert.match(res.stdout, /packed ok/);
+});
+
+test("a state dir inside the workspace is not mistaken for a read-only violation", () => {
+  const sb = makeSandbox();
+  for (const git of [true, false]) {
+    const box = git ? sb : makeSandbox({ git: false });
+    const res = companion(box, ["task", "look"], { AGY_COMPANION_STATE_DIR: path.join(box.repo, ".agy-state"), FAKE_AGY_RESPONSE: "clean" });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.stdout.trim(), "clean");
+  }
+});

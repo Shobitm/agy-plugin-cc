@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { DEPTH_ENV, getAgyAvailability } from "./lib/agy.mjs";
 import { diffFingerprints, newBoundary, workspaceFingerprint, wrapUntrusted } from "./lib/git.mjs";
-import { ACTIVE_STATUSES, getConfig, listJobs, loadBaseline, resolveWorkspaceRoot, saveBaseline } from "./lib/state.mjs";
+import { ACTIVE_STATUSES, getConfig, listJobs, loadBaseline, resolveWorkspaceRoot, saveBaseline, stateRoot } from "./lib/state.mjs";
 
 // hooks.json gives the Stop hook 900s. Leave room to cancel the job cleanly.
 const GATE_WAIT_SECONDS = 780;
@@ -122,7 +122,7 @@ function captureBaseline(input) {
   if (!getConfig(workspace).stopReviewGate) {
     return;
   }
-  saveBaseline(workspace, input.session_id, { capturedAt: new Date().toISOString(), ...workspaceFingerprint(cwd) });
+  saveBaseline(workspace, input.session_id, { capturedAt: new Date().toISOString(), ...workspaceFingerprint(cwd, { exclude: [stateRoot()] }) });
 }
 
 function stopGate(input) {
@@ -145,7 +145,7 @@ function stopGate(input) {
   }
 
   const baseline = loadBaseline(workspace, input.session_id);
-  const current = workspaceFingerprint(cwd);
+  const current = workspaceFingerprint(cwd, { exclude: [stateRoot()] });
   // Without a baseline outside git there is no way to tell what this turn
   // touched, so skip rather than review the whole directory.
   const changedFiles = baseline

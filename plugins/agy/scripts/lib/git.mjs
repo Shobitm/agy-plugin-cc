@@ -410,15 +410,31 @@ function walkFiles(root) {
   return out;
 }
 
+function realOrResolved(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+// Paths under `exclude` (the companion's own state directory, which may sit
+// inside the workspace) are ignored.
+function excluder(root, exclude) {
+  const prefixes = exclude.map(realOrResolved).map((dir) => path.relative(realOrResolved(root), dir)).filter((rel) => rel && !rel.startsWith(".."));
+  return (rel) => !prefixes.some((prefix) => rel === prefix || rel.startsWith(prefix + path.sep) || rel.startsWith(prefix + "/"));
+}
+
 // Map of path -> content hash for every file that differs from HEAD (tracked
 // changes and untracked files), plus HEAD itself. Outside git, every file
 // under the directory (bounded) is hashed by size+mtime.
-export function workspaceFingerprint(cwd) {
+export function workspaceFingerprint(cwd, { exclude = [] } = {}) {
   const repoRoot = resolveGitRoot(cwd);
   if (!repoRoot) {
     const root = path.resolve(cwd);
+    const keep = excluder(root, exclude);
     const files = {};
-    for (const rel of walkFiles(root)) {
+    for (const rel of walkFiles(root).filter(keep)) {
       try {
         const stat = fs.lstatSync(path.join(root, rel));
         files[rel] = `${stat.size}:${stat.mtimeMs}`;
@@ -431,8 +447,9 @@ export function workspaceFingerprint(cwd) {
   const head = runGit(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD"], true).stdout.trim() || null;
   const tracked = splitZ(runGit(repoRoot, ["diff", "HEAD", "--name-only", "-z"], true).stdout);
   const untracked = splitZ(runGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"], true).stdout);
+  const keep = excluder(repoRoot, exclude);
   const files = {};
-  for (const rel of [...tracked, ...untracked]) {
+  for (const rel of [...tracked, ...untracked].filter(keep)) {
     files[rel] = hashFile(path.join(repoRoot, rel));
   }
   return { kind: "git", root: repoRoot, head, files };

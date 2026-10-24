@@ -12,8 +12,9 @@ Raw user request:
 $ARGUMENTS
 
 Execution mode:
-- `--background` and `--wait` are execution flags. Keep them in the forwarded request; the subagent maps them onto the companion.
-- If neither is present, the subagent decides (foreground for small bounded asks, background for open-ended work).
+- If the request includes `--background`, run the `agy:agy-rescue` subagent in the background (Agent tool `run_in_background: true` where the tool offers it). You are notified when it finishes; then relay its output verbatim. Do not tell the subagent to detach.
+- If the request includes `--wait`, or neither flag, run the subagent in the foreground.
+- `--background` and `--wait` are Claude-side execution flags. Strip them from the forwarded request.
 - If the request includes `--resume` or `--fresh`, do not ask whether to continue. The user already chose.
 - Otherwise, check for a resumable Antigravity conversation:
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Fix: `/agy:rescue` never reported Antigravity's answer back. The subagent detached the job with `--background`, finished in seconds holding only a job ID, and nothing announced completion. The subagent now always stays attached: it runs `task` in the foreground and, if the output starts with `STILL_RUNNING <job-id>`, keeps calling the new `result <job-id> --wait` until the answer exists. `/agy:rescue --background` backgrounds the subagent itself on the Claude side, so you are notified with the real result.
+- New: `result [job-id] --wait [--timeout-ms <ms>]` (exit code 2 = still running).
+- Fix: the read-only integrity check ignores the plugin's own state directory when it sits inside the workspace.
+
 ## 0.2.0
 
 Fixes from adversarial reviews by Antigravity and Codex, plus agy 1.4.7 changes.
