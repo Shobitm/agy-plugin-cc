@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4
+
+- Windows: job-state writes retry transient `EPERM`/`EBUSY`/`EACCES` (antivirus or indexer holding a file), which could drop job updates under concurrency.
+
 ## 0.2.3
 
 - Foreground runs print `agy job <id> started` to stderr immediately, so the job can still be collected with `result <id> --wait` if the caller's shell kills the command early (e.g. a short agent shell timeout).
